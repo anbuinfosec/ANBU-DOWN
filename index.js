@@ -10,9 +10,9 @@ dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const API = "https://api.anbuinfosec.xyz/api/downloader/download";
-const AUTO_DELETE_MS = 24 * 60 * 60 * 1000;
+const AUTO_DELETE_MS = 24 * 60 * 60 * 1000; // 24 hours
 const DOWNLOADS_DIR = path.join(__dirname, "downloads");
-const CHANNEL_USERNAME = '@anbuinfosec_official';
+const CHANNEL_USERNAME = '@anbuinfosec_official'; // Make sure this is your exact channel username with '@'
 const CHANNEL_JOIN_URL = 'https://t.me/anbuinfosec_official';
 const DEVELOPER_URL = 'https://t.me/anbuinfosec';
 
@@ -22,6 +22,7 @@ if (!fs.existsSync(DOWNLOADS_DIR)) {
 }
 
 const userMediaMap = new Map();
+const userLastAction = {};
 const startTime = Date.now();
 
 function autoDelete(ctx, messageId) {
@@ -29,9 +30,59 @@ function autoDelete(ctx, messageId) {
     try {
       await ctx.deleteMessage(messageId);
       logger.info(`Deleted message ${messageId} for chat ${ctx.chat.id}`);
-    } catch {}
+    } catch (e) {
+      logger.warn(`Failed to delete message ${messageId}: ${e.message}`);
+    }
   }, AUTO_DELETE_MS);
 }
+
+// Middleware to check channel membership before processing any private messages (text or callbacks)
+bot.use(async (ctx, next) => {
+  try {
+    if (!ctx.from || ctx.from.is_bot) return next();
+    if (ctx.chat && ctx.chat.type !== 'private') return next();
+
+    const member = await ctx.telegram.getChatMember(CHANNEL_USERNAME, ctx.from.id);
+    logger.info(`Membership check for user ${ctx.from.id}: ${JSON.stringify(member)}`);
+
+    // If not joined or restricted, prompt to join
+    if (!member || member.status === 'left' || member.status === 'kicked' || member.status === 'restricted') {
+      if (ctx.message && ctx.message.text) {
+        userLastAction[ctx.from.id] = { type: 'text', data: ctx.message.text };
+      } else if (ctx.callbackQuery && ctx.callbackQuery.data) {
+        userLastAction[ctx.from.id] = { type: 'callback', data: ctx.callbackQuery.data };
+      }
+
+      await ctx.replyWithMarkdown(
+        `🚫 *You must join our channel to use this bot!*\n\n[Join Channel](${CHANNEL_JOIN_URL})`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: 'Join Channel', url: CHANNEL_JOIN_URL }],
+              [{ text: 'Joined ✅', callback_data: 'joined_check' }]
+            ]
+          }
+        }
+      );
+      return; // stop further processing until user joins
+    }
+
+    return next();
+  } catch (err) {
+    logger.error('Channel join check failed', { userId: ctx.from?.id, error: err.message });
+    await ctx.replyWithMarkdown(
+      `🚫 *You must join our channel to use this bot!*\n\n[Join Channel](${CHANNEL_JOIN_URL})`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: 'Join Channel', url: CHANNEL_JOIN_URL }],
+            [{ text: 'Joined ✅', callback_data: 'joined_check' }]
+          ]
+        }
+      }
+    );
+  }
+});
 
 bot.start((ctx) => {
   logger.info(`User ${ctx.from.id} started the bot`);
@@ -55,60 +106,13 @@ bot.command("uptime", (ctx) => {
   autoDelete(ctx, ctx.message.message_id);
 });
 
-bot.use(async (ctx, next) => {
-    try {
-        if (!ctx.from || ctx.from.is_bot) return next();
-        if (ctx.chat && ctx.chat.type !== 'private') return next();
-        const member = await ctx.telegram.getChatMember(CHANNEL_USERNAME, ctx.from.id);
-        logger.info(`Membership check for user ${ctx.from.id}: ${member.status}`);
-        if (member.status === 'left' || member.status === 'kicked') {
-            if (ctx.message && ctx.message.text) {
-                userLastAction[ctx.from.id] = {
-                    type: 'text',
-                    data: ctx.message.text
-                };
-            } else if (ctx.callbackQuery && ctx.callbackQuery.data) {
-                userLastAction[ctx.from.id] = {
-                    type: 'callback',
-                    data: ctx.callbackQuery.data
-                };
-            }
-            await ctx.replyWithMarkdown(
-                `🚫 *You must join our channel to use this bot!*\n\n[Join Channel](${CHANNEL_JOIN_URL})`,
-                {
-                    reply_markup: {
-                        inline_keyboard: [
-                            [{ text: 'Join Channel', url: CHANNEL_JOIN_URL }],
-                            [{ text: 'Joined ✅', callback_data: 'joined_check' }]
-                        ]
-                    }
-                }
-            );
-            return;
-        }
-        return next();
-    } catch (err) {
-        logger.error('Channel join check failed', { userId: ctx.from?.id, error: err.message });
-        await ctx.replyWithMarkdown(
-            `🚫 *You must join our channel to use this bot!*\n\n[Join Channel](${CHANNEL_JOIN_URL})`,
-            {
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: 'Join Channel', url: CHANNEL_JOIN_URL }],
-                        [{ text: 'Joined ✅', callback_data: 'joined_check' }]
-                    ]
-                }
-            }
-        );
-        return;
-    }
-});
-
+// Handler for the "Joined ✅" button callback
 bot.action('joined_check', async (ctx) => {
   try {
     const member = await ctx.telegram.getChatMember(CHANNEL_USERNAME, ctx.from.id);
-    logger.info(`Membership check for user ${ctx.from.id}: ${member.status}`);
-    if (!member || member.status === 'left' || member.status === 'kicked') {
+    logger.info(`Membership check for user ${ctx.from.id} (joined_check): ${JSON.stringify(member)}`);
+
+    if (!member || member.status === 'left' || member.status === 'kicked' || member.status === 'restricted') {
       await ctx.answerCbQuery('❌ You have not joined the channel yet.', { show_alert: true });
       return;
     }
@@ -175,7 +179,7 @@ bot.on("text", async (ctx) => {
     const res = await axios.get(`${API}?url=${encodeURIComponent(url)}&apikey=${process.env.API_KEY}`);
     const data = res.data;
 
-    if (!data.success || data.error || !data.medias || data.medias.length === 0) {
+    if (!data.status || !data.success || data.error || !data.medias || data.medias.length === 0) {
       await ctx.reply("Failed to fetch media or no media found.");
       return;
     }
