@@ -41,7 +41,7 @@
 ## 📦 Installation
 
 ```bash
-git clone https://github.com/your-username/ANBU_DOWN.git
+git clone https://github.com/anbuinfosec/ANBU_DOWN.git
 cd ANBU_DOWN
 npm install
 ```
